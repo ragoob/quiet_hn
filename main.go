@@ -7,13 +7,21 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/gophercises/quiet_hn/hn"
+	"github.com/ragoob/quiet_hn/hn"
+)
+
+var (
+	mu    sync.Mutex
+	cache map[int]item
 )
 
 func main() {
+	cache = make(map[int]item)
 	// parse flags
 	var port, numStories int
 	flag.IntVar(&port, "port", 3000, "the port to start the web server on")
@@ -38,19 +46,47 @@ func handler(numStories int, tpl *template.Template) http.HandlerFunc {
 			return
 		}
 		var stories []item
+		var wg sync.WaitGroup
+		total := int32(float64(numStories) * 1.25)
+		ids = ids[0:total]
 		for _, id := range ids {
-			hnItem, err := client.GetItem(id)
-			if err != nil {
+			mu.Lock()
+			v, ok := cache[id]
+			if ok {
+				fmt.Printf("Item with Id [%d] cached \n", id)
+				stories = append(stories, v)
+				mu.Unlock()
 				continue
 			}
-			item := parseHNItem(hnItem)
-			if isStoryLink(item) {
-				stories = append(stories, item)
-				if len(stories) >= numStories {
-					break
+			mu.Unlock()
+
+			fmt.Printf("Looking for Item [%d] from service \n", id)
+			wg.Add(1)
+			go func(id int) {
+				defer wg.Done()
+				hnItem, err := client.GetItem(id)
+				if err != nil {
+					return
 				}
-			}
+				item := parseHNItem(hnItem)
+				if isStoryLink(item) {
+
+					mu.Lock()
+
+					if len(stories) < numStories {
+						stories = append(stories, item)
+						cache[id] = item
+					}
+
+					mu.Unlock()
+
+				}
+			}(id)
 		}
+		wg.Wait()
+		sort.Slice(stories, func(i, j int) bool {
+			return stories[i].ID < stories[j].ID
+		})
 		data := templateData{
 			Stories: stories,
 			Time:    time.Now().Sub(start),
